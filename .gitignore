@@ -1,0 +1,14 @@
+# Ignore the Zig cache directory
+.zig-cache/
+
+# Ignore build artifacts
+zig-out/
+build/
+
+# Ignore executables
+*.o
+redis-cli
+
+# Ignore system-specific files
+.DS_Store
+Thumbs.db
