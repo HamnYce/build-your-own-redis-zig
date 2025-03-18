@@ -32,21 +32,30 @@ const Conn = struct {
     fn read(conn: *Conn) !void {
         var buffer: [1024]u8 = undefined;
         const n = try conn.connection.stream.read(&buffer);
+        if (n == 0) {
+            conn.want_close = true;
+            return;
+        }
         std.log.debug("read {d} bytes", .{n});
 
         try conn.incoming.appendSlice(buffer[0..n]);
 
-        if (conn.incoming.items.len < n + 4) {
-            return; // still don't have enough to try request
+        if (conn.incoming.items.len < 4) {
+            return; // do not have enough to get message length
         }
 
         const msg_len: usize = @intCast(std.mem.readInt(i32, buffer[0..4], .big));
+
+        if (conn.incoming.items.len < msg_len + 4) {
+            return; // do not have enough to try request
+        }
         std.log.debug("msg_len={d}", .{msg_len});
 
-        try_request(conn.incoming.items[4 .. msg_len + 4]);
+        try_one_request(conn.incoming.items[4 .. 4 + msg_len]);
 
-        consume_buffer(&conn.incoming, msg_len + 4);
+        consume_buffer(&conn.incoming, 4 + msg_len);
 
+        std.log.debug("waiting to send message to client", .{});
         conn.want_read = false;
         conn.want_write = true;
     }
@@ -55,6 +64,7 @@ const Conn = struct {
         const n = try conn.connection.stream.write(conn.outgoing.items);
         consume_buffer(&conn.outgoing, n);
         if (conn.outgoing.items.len == 0) {
+            std.log.debug("waiting for client to send message", .{});
             conn.want_read = true;
             conn.want_write = false;
         }
@@ -62,16 +72,15 @@ const Conn = struct {
 };
 
 fn consume_buffer(buf: *std.ArrayList(u8), n: usize) void {
-    _ = n;
     std.log.debug("Consuming buffer ", .{});
     // needs testing
-    // const rest = buf.items[n..];
+    const rest = buf.items[n..];
     buf.clearRetainingCapacity();
+    buf.appendSliceAssumeCapacity(rest);
     std.debug.assert(buf.items.len == 0);
-    return;
 }
 
-fn try_request(request: []u8) void {
+fn try_one_request(request: []u8) void {
     std.log.debug("received from connection. msg_len={d}, msg={s}", .{ request.len, request });
 }
 
@@ -97,11 +106,17 @@ pub fn main() !void {
         // append the server as the first element to poll
         try poll_args.append(.{ .fd = server.stream.handle, .events = std.posix.POLL.IN, .revents = 0 });
 
-        for (&conns) |conn| {
+        for (&conns, 0..) |conn, i| {
             if (conn == null) {
                 continue;
             }
             var poll_arg: std.posix.pollfd = .{ .fd = conn.?.connection.stream.handle, .events = std.posix.POLL.ERR, .revents = 0 };
+
+            if (conn.?.want_close) {
+                conn.?.deinit();
+                conns[i] = null;
+            }
+
             if (conn.?.want_read) {
                 poll_arg.events |= std.posix.POLL.IN;
             }
@@ -123,9 +138,10 @@ pub fn main() !void {
         };
 
         // server has a new connection
-        if (poll_args.items[0].revents & std.posix.POLL.IN > 0) {
+        if (std.posix.POLL.IN == poll_args.items[0].revents & std.posix.POLL.IN) {
             var conn = try server.accept();
-
+            const addr_bytes = @as([4]u8, @bitCast(conn.address.in.sa.addr));
+            std.log.debug("connected to new client address: {}.{}.{}.{}:{}", .{ addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3], conn.address.in.sa.port });
             conns[@intCast(conn.stream.handle)] = @constCast(&Conn.init(&conn));
         }
         // endregion
@@ -139,6 +155,7 @@ pub fn main() !void {
             if (std.posix.POLL.ERR == poll_arg.revents & std.posix.POLL.ERR) {
                 conn.?.deinit();
                 conns[@as(usize, @intCast(poll_arg.fd))] = null;
+                continue;
             }
 
             if (std.posix.POLL.IN == poll_arg.revents & std.posix.POLL.IN) {
