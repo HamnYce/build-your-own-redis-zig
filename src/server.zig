@@ -1,39 +1,154 @@
 const std = @import("std");
-const consts = @import(" consts.zig");
+const consts = @import("consts.zig");
 const net = std.net;
+
+const Conn = struct {
+    connection: *net.Server.Connection,
+    incoming: std.ArrayList(u8),
+    outgoing: std.ArrayList(u8),
+
+    /// Communication flag for the event loop (poll)
+    /// set as true so we read the first request from the connection
+    want_read: bool = true,
+    /// Communication flag for the event loop (poll)
+    want_write: bool = false,
+    /// Communication flag for the event loop (poll)
+    want_close: bool = false,
+
+    fn init(connection: *net.Server.Connection) Conn {
+        return .{
+            .connection = connection,
+            .incoming = std.ArrayList(u8).init(std.heap.page_allocator),
+            .outgoing = std.ArrayList(u8).init(std.heap.page_allocator),
+        };
+    }
+
+    fn deinit(conn: Conn) void {
+        conn.connection.stream.close();
+        conn.incoming.deinit();
+        conn.outgoing.deinit();
+    }
+
+    fn read(conn: *Conn) !void {
+        var buffer: [1024]u8 = undefined;
+        const n = try conn.connection.stream.read(&buffer);
+        std.log.debug("read {d} bytes", .{n});
+
+        try conn.incoming.appendSlice(buffer[0..n]);
+
+        if (conn.incoming.items.len < n + 4) {
+            return; // still don't have enough to try request
+        }
+
+        const msg_len: usize = @intCast(std.mem.readInt(i32, buffer[0..4], .big));
+        std.log.debug("msg_len={d}", .{msg_len});
+
+        try_request(conn.incoming.items[4 .. msg_len + 4]);
+
+        consume_buffer(&conn.incoming, msg_len + 4);
+
+        conn.want_read = false;
+        conn.want_write = true;
+    }
+
+    fn write(conn: *Conn) !void {
+        const n = try conn.connection.stream.write(conn.outgoing.items);
+        consume_buffer(&conn.outgoing, n);
+        if (conn.outgoing.items.len == 0) {
+            conn.want_read = true;
+            conn.want_write = false;
+        }
+    }
+};
+
+fn consume_buffer(buf: *std.ArrayList(u8), n: usize) void {
+    _ = n;
+    std.log.debug("Consuming buffer ", .{});
+    // needs testing
+    // const rest = buf.items[n..];
+    buf.clearRetainingCapacity();
+    std.debug.assert(buf.items.len == 0);
+    return;
+}
+
+fn try_request(request: []u8) void {
+    std.log.debug("received from connection. msg_len={d}, msg={s}", .{ request.len, request });
+}
 
 pub fn main() !void {
     var address = net.Address.initIp4([_]u8{ 127, 0, 0, 1 }, 6739);
 
     std.log.debug("server listening", .{});
-    var server = try address.listen(.{
-        .reuse_address = true,
-        .force_nonblocking = true,
-    });
-
-    var buffer: [consts.max_msg_len]u8 = undefined;
-    while (true) {
-        const client = try server.accept();
-        one_request(&client, &buffer) catch {
-            std.log.debug("client disconnected", .{});
-        };
-        client.stream.close();
+    var server = try address.listen(.{ .reuse_address = true, .force_nonblocking = true });
+    defer {
+        std.log.debug("closing server", .{});
+        server.deinit();
     }
 
-    std.log.debug("closing server", .{});
-    server.deinit();
-}
+    std.log.debug("creating connections array", .{});
+    var conns: [100]?*Conn = [_]?*Conn{null} ** 100;
 
-fn one_request(client: *std.net.Server.Connection, buffer: *[]u8) !void {
-    const n = try client.stream.readAll(&buffer);
-    std.log.debug("received from client: {s}\n", .{buffer[0..n]});
+    std.log.debug("creating polls array", .{});
+    var poll_args = std.ArrayList(std.posix.pollfd).init(std.heap.page_allocator);
 
-    _ = std.ascii.upperString(buffer[0..n], buffer[0..n]);
+    while (true) {
+        // region event loop
+        poll_args.clearRetainingCapacity();
+        // append the server as the first element to poll
+        try poll_args.append(.{ .fd = server.stream.handle, .events = std.posix.POLL.IN, .revents = 0 });
 
-    _ = try client.stream.writeAll(buffer[0..n]);
-}
+        for (&conns) |conn| {
+            if (conn == null) {
+                continue;
+            }
+            var poll_arg: std.posix.pollfd = .{ .fd = conn.?.connection.stream.handle, .events = std.posix.POLL.ERR, .revents = 0 };
+            if (conn.?.want_read) {
+                poll_arg.events |= std.posix.POLL.IN;
+            }
 
-fn read_full(client: *std.net.Server.Connection, buffer: *[]u8) void {
-    _ = client;
-    _ = buffer;
+            if (conn.?.want_write) {
+                poll_arg.events |= std.posix.POLL.OUT;
+            }
+
+            poll_args.append(poll_arg) catch {
+                std.log.debug("Could not allocate extra space for poll_arg", .{});
+                std.posix.exit(1);
+            };
+        }
+
+        // program should crash if cannot poll
+        _ = std.posix.poll(poll_args.items, -1) catch {
+            std.log.debug("Could not poll", .{});
+            std.posix.exit(1);
+        };
+
+        // server has a new connection
+        if (poll_args.items[0].revents & std.posix.POLL.IN > 0) {
+            var conn = try server.accept();
+
+            conns[@intCast(conn.stream.handle)] = @constCast(&Conn.init(&conn));
+        }
+        // endregion
+
+        //region application code
+        // TODO: implement read and write, using the protocol of first 4 bytes being the length of the message
+        for (1..poll_args.items.len) |i| {
+            const poll_arg: std.posix.pollfd = poll_args.items[i];
+            var conn = conns[@as(usize, @intCast(poll_arg.fd))];
+
+            if (std.posix.POLL.ERR == poll_arg.revents & std.posix.POLL.ERR) {
+                conn.?.deinit();
+                conns[@as(usize, @intCast(poll_arg.fd))] = null;
+            }
+
+            if (std.posix.POLL.IN == poll_arg.revents & std.posix.POLL.IN) {
+                try conn.?.read();
+            }
+
+            if (std.posix.POLL.OUT == poll_arg.revents & std.posix.POLL.OUT) {
+                try conn.?.write();
+            }
+        }
+        // endregion
+    }
 }
