@@ -44,13 +44,14 @@ const Conn = struct {
             return; // do not have enough to get message length
         }
 
-        const msg_len: usize = @intCast(std.mem.readInt(i32, buffer[0..4], .big));
+        const msg_len: usize = @intCast(std.mem.readInt(u32, buffer[0..4], .big));
 
         if (conn.incoming.items.len < msg_len + 4) {
             return; // do not have enough to try request
         }
         std.log.debug("msg_len={d}", .{msg_len});
 
+        //TODO: not working, might be an endianess problem
         try_one_request(conn.incoming.items[4 .. 4 + msg_len]);
 
         consume_buffer(&conn.incoming, 4 + msg_len);
@@ -112,17 +113,26 @@ pub fn main() !void {
             }
             var poll_arg: std.posix.pollfd = .{ .fd = conn.?.connection.stream.handle, .events = std.posix.POLL.ERR, .revents = 0 };
 
-            if (conn.?.want_close) {
-                conn.?.deinit();
-                conns[i] = null;
-            }
-
             if (conn.?.want_read) {
                 poll_arg.events |= std.posix.POLL.IN;
             }
 
             if (conn.?.want_write) {
                 poll_arg.events |= std.posix.POLL.OUT;
+            }
+
+            if (conn.?.want_close) {
+                conn.?.deinit();
+                conns[i] = null;
+                const addr_bytes = @as([4]u8, @bitCast(conn.?.connection.address.in.sa.addr));
+                std.log.debug("disconnected from client with address: {}.{}.{}.{}:{}", .{
+                    addr_bytes[0],
+                    addr_bytes[1],
+                    addr_bytes[2],
+                    addr_bytes[3],
+                    conn.?.connection.address.in.sa.port,
+                });
+                continue;
             }
 
             poll_args.append(poll_arg) catch {
@@ -155,6 +165,14 @@ pub fn main() !void {
             if (std.posix.POLL.ERR == poll_arg.revents & std.posix.POLL.ERR) {
                 conn.?.deinit();
                 conns[@as(usize, @intCast(poll_arg.fd))] = null;
+                const addr_bytes = @as([4]u8, @bitCast(conn.?.connection.address.in.sa.addr));
+                std.log.debug("disconnected from client with address: {}.{}.{}.{}:{}", .{
+                    addr_bytes[0],
+                    addr_bytes[1],
+                    addr_bytes[2],
+                    addr_bytes[3],
+                    conn.?.connection.address.in.sa.port,
+                });
                 continue;
             }
 

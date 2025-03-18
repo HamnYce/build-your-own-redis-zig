@@ -15,8 +15,13 @@ pub fn main() !void {
     var buffer: [consts.max_msg_len]u8 = undefined;
     while (true) {
         var n = try stdin.read(&buffer);
-        const trimmed_slice = std.mem.trim(u8, buffer[0..n], "\r\n");
-        _ = try server.write(trimmed_slice);
+        const msg = std.mem.trim(u8, buffer[0..n], " \r\n");
+
+        const msg_len: u32 = @intCast(msg.len);
+        const msg_len_bytes: *align(4) const [4]u8 = std.mem.asBytes(&msg_len);
+        _ = try server.write(msg_len_bytes);
+        _ = try server.write(msg);
+        std.log.debug("wrote: {d}, {s}", .{ msg_len, msg });
         n = try server.read(&buffer);
 
         std.log.debug("Server: {s}\n", .{buffer[0..n]});
