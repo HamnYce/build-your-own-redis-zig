@@ -40,25 +40,13 @@ const Conn = struct {
 
         try conn.incoming.appendSlice(buffer[0..n]);
 
-        if (conn.incoming.items.len < 4) {
-            return; // do not have enough to get message length
+        const request_success = try conn.try_one_request();
+        if (request_success) {
+            std.log.debug("request success", .{});
+            conn.want_read = false;
+            conn.want_write = true;
+            std.log.debug("waiting to send message to client", .{});
         }
-
-        const msg_len: usize = @intCast(std.mem.readInt(u32, buffer[0..4], .big));
-
-        if (conn.incoming.items.len < msg_len + 4) {
-            return; // do not have enough to try request
-        }
-        std.log.debug("msg_len={d}", .{msg_len});
-
-        //TODO: not working, might be an endianess problem
-        try_one_request(conn.incoming.items[4 .. 4 + msg_len]);
-
-        consume_buffer(&conn.incoming, 4 + msg_len);
-
-        std.log.debug("waiting to send message to client", .{});
-        conn.want_read = false;
-        conn.want_write = true;
     }
 
     fn write(conn: *Conn) !void {
@@ -70,19 +58,36 @@ const Conn = struct {
             conn.want_write = false;
         }
     }
+
+    fn try_one_request(conn: *Conn) !bool {
+        if (conn.incoming.items.len < 4) {
+            return false; // do not have enough to get message length
+        }
+
+        const msg_len: usize = @intCast(std.mem.readInt(u32, conn.incoming.items[0..4], .little));
+        std.log.debug("msg_len={d}", .{msg_len});
+
+        if (msg_len > consts.max_msg_len) {
+            conn.want_close = true;
+            return false;
+        }
+
+        if (conn.incoming.items.len < msg_len + 4) {
+            std.log.debug("do not have enough", .{});
+            return false; // do not have enough to try request
+        }
+
+        std.log.debug("request: msg_len={d}, msg={s}", .{ msg_len, conn.incoming.items[4 .. 4 + msg_len] });
+        try conn.outgoing.appendSlice(conn.incoming.items[4 .. 4 + msg_len]);
+        consume_buffer(&conn.incoming, 4 + msg_len);
+        return true;
+    }
 };
 
 fn consume_buffer(buf: *std.ArrayList(u8), n: usize) void {
     std.log.debug("Consuming buffer ", .{});
-    // needs testing
-    const rest = buf.items[n..];
-    buf.clearRetainingCapacity();
-    buf.appendSliceAssumeCapacity(rest);
-    std.debug.assert(buf.items.len == 0);
-}
-
-fn try_one_request(request: []u8) void {
-    std.log.debug("received from connection. msg_len={d}, msg={s}", .{ request.len, request });
+    buf.replaceRangeAssumeCapacity(0, buf.items[n..buf.items.len].len, buf.items[n..buf.items.len]);
+    buf.shrinkRetainingCapacity(buf.items.len - n);
 }
 
 pub fn main() !void {
