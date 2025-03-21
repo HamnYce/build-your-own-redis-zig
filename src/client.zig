@@ -14,17 +14,34 @@ pub fn main() !void {
 
     var buffer: [consts.max_msg_len]u8 = undefined;
     while (true) {
-        var n = try stdin.read(&buffer);
-        const msg = std.mem.trim(u8, buffer[0..n], " \r\n");
+        // write
+        {
+            // user input
+            const n = try stdin.read(&buffer);
+            const msg = std.mem.trim(u8, buffer[0..n], &std.ascii.whitespace);
+            // header
+            var msg_len: u32 = @intCast(msg.len);
+            const msg_len_bytes: *align(4) const [4]u8 = std.mem.asBytes(&msg_len);
+            try server.writeAll(msg_len_bytes);
 
-        const msg_len: u32 = @intCast(msg.len);
-        const msg_len_bytes: *align(4) const [4]u8 = std.mem.asBytes(&msg_len);
-        _ = try server.write(msg_len_bytes);
-        _ = try server.write(msg);
-        std.log.debug("wrote: {d}, {s}", .{ msg_len, msg });
-        n = try server.read(&buffer);
+            // body
+            try server.writeAll(msg);
 
-        std.log.debug("Server: {s}\n", .{buffer[0..n]});
+            std.log.debug("wrote: {d}, {s}", .{ msg_len, msg });
+        }
+
+        // read
+        {
+            // header
+            var n = try server.readAll(buffer[0..4]);
+            const msg_len: u32 = @intCast(std.mem.readInt(u32, buffer[0..4], .little));
+
+            // body
+            n = try server.readAll(buffer[0..msg_len]);
+            std.debug.assert(n == msg_len);
+
+            std.log.debug("Server: {s}\n", .{buffer[0..msg_len]});
+        }
     }
 
     server.close();

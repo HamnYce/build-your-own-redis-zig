@@ -70,7 +70,7 @@ const Conn = struct {
             return false; // do not have enough to get message length
         }
 
-        const msg_len: usize = @intCast(std.mem.readInt(u32, conn.incoming.items[0..4], .little));
+        const msg_len: u32 = @intCast(std.mem.readInt(u32, conn.incoming.items[0..4], .little));
 
         if (msg_len > consts.max_msg_len) {
             std.log.debug("message length greater than max messag length, len:{d}", .{msg_len});
@@ -84,6 +84,9 @@ const Conn = struct {
         }
 
         std.log.debug("adding message to outgoing buffer", .{});
+
+        const msg_len_bytes: *align(4) const [4]u8 = std.mem.asBytes(&msg_len);
+        try conn.outgoing.appendSlice(msg_len_bytes);
         try conn.outgoing.appendSlice(conn.incoming.items[4 .. 4 + msg_len]);
         consume_buffer(&conn.incoming, 4 + msg_len);
         return true;
