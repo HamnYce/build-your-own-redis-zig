@@ -46,21 +46,20 @@ const Conn = struct {
 
         try conn.incoming.appendSlice(buffer[0..n]);
 
-        const request_success = try conn.try_one_request();
-        if (request_success) {
+        while (try conn.try_one_request()) {}
+
+        if (conn.outgoing.items.len > 0) {
             conn.want_read = false;
             conn.want_write = true;
         }
     }
 
     fn write(conn: *Conn) !void {
-        const n = try conn.connection.stream.write(conn.outgoing.items);
-        std.log.debug("wrote {d} bytes to client", .{n});
-        consume_buffer(&conn.outgoing, n);
-        if (conn.outgoing.items.len == 0) {
-            conn.want_read = true;
-            conn.want_write = false;
-        }
+        std.debug.assert(conn.outgoing.items.len > 0);
+        try conn.connection.stream.writeAll(conn.outgoing.items);
+        conn.outgoing.clearRetainingCapacity();
+        conn.want_read = true;
+        conn.want_write = false;
     }
 
     fn try_one_request(conn: *Conn) !bool {
@@ -88,6 +87,7 @@ const Conn = struct {
         const msg_len_bytes: *align(4) const [4]u8 = std.mem.asBytes(&msg_len);
         try conn.outgoing.appendSlice(msg_len_bytes);
         try conn.outgoing.appendSlice(conn.incoming.items[4 .. 4 + msg_len]);
+
         consume_buffer(&conn.incoming, 4 + msg_len);
         return true;
     }
