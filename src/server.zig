@@ -94,7 +94,8 @@ const Conn = struct {
 };
 
 fn consume_buffer(buf: *std.ArrayList(u8), n: usize) void {
-    buf.replaceRangeAssumeCapacity(0, buf.items[n..buf.items.len].len, buf.items[n..buf.items.len]);
+    // cannot use replaceRange because interally it uses memcpy and our memory overlaps
+    std.mem.copyForwards(u8, buf.items, buf.items[n..buf.items.len]);
     buf.shrinkRetainingCapacity(buf.items.len - n);
 }
 
